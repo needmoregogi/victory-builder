@@ -131,6 +131,111 @@ function pluralize(n, singular, plural) {
   return `${n} ${n === 1 ? singular : plural}`;
 }
 
+// ---- duplicate-word detection ----
+// A curated list of the descriptive words actually prone to repeating across
+// this bank's openings/middles/closings (found by analyzing real overlap
+// across every possible pairing), each with a couple of tone-appropriate
+// synonyms. Generic connective words (semester, look, forward, work, etc.)
+// are deliberately excluded — repeating those is normal, not disingenuous.
+const RISK_WORDS = {
+  progress: ["growth", "development", "advancement"],
+  continued: ["ongoing", "sustained", "steady"],
+  confidence: ["self-assurance", "poise", "assuredness"],
+  confident: ["self-assured", "poised"],
+  strong: ["solid", "robust", "considerable"],
+  ideas: ["thoughts", "input", "contributions"],
+  building: ["growing", "developing", "strengthening"],
+  steady: ["consistent", "reliable", "even"],
+  effort: ["work", "dedication", "commitment"],
+  encouraging: ["promising", "positive", "heartening"],
+  genuine: ["real", "authentic", "sincere"],
+  consistency: ["reliability", "steadiness"],
+  thoughtful: ["considerate", "reflective"],
+  creative: ["imaginative", "inventive"],
+  curiosity: ["inquisitiveness", "interest"],
+  imagination: ["creativity", "inventiveness"],
+  imaginative: ["creative", "inventive"],
+  determination: ["resolve", "persistence"],
+  persistence: ["perseverance", "resolve"],
+  perseverance: ["persistence", "resolve"],
+  responsibility: ["accountability", "reliability"],
+  enthusiasm: ["energy", "eagerness", "excitement"],
+  poise: ["composure", "self-possession", "assurance"],
+  growth: ["development", "progress", "advancement"],
+  development: ["growth", "progress", "advancement"],
+  thoughts: ["ideas", "input", "reflections"],
+  contributions: ["input", "participation"],
+  creativity: ["imagination", "inventiveness"],
+};
+
+function countWholeWord(text, word) {
+  const re = new RegExp(`\\b${word}\\b`, "gi");
+  const matches = text.match(re);
+  return matches ? matches.length : 0;
+}
+
+function detectDuplicateRiskWords(fullText) {
+  const found = [];
+  Object.keys(RISK_WORDS).forEach((word) => {
+    const count = countWholeWord(fullText, word);
+    if (count >= 2) found.push({ word, count });
+  });
+  return found;
+}
+
+// Replace every occurrence of `word` in `text` with `synonym`, matching the
+// capitalization of each individual occurrence.
+function replaceAllWholeWord(text, word, synonym) {
+  const re = new RegExp(`\\b${word}\\b`, "gi");
+  return text.replace(re, (match) => (
+    match[0] === match[0].toUpperCase() ? cap(synonym) : synonym
+  ));
+}
+
+// Apply a synonym fix ONE occurrence at a time: keep the first paragraph
+// containing the word unchanged, and swap the word in exactly the next
+// paragraph that also contains it — no further ones. If the word appears
+// 3+ times, this leaves it still flagged so the person can click again
+// (and even pick a different synonym each time) rather than blasting every
+// remaining occurrence to the same word in one click.
+function computeSynonymOverride(paragraphs, existingOverrides, word, synonym) {
+  const resolved = paragraphs.map((text, i) => applyParagraphOverrides(text, existingOverrides[i]));
+  const next = { ...existingOverrides };
+  let seenFirst = false;
+  let fixedOne = false;
+  for (let i = 0; i < resolved.length; i++) {
+    if (fixedOne) break;
+    if (countWholeWord(resolved[i], word) === 0) continue;
+    if (!seenFirst) { seenFirst = true; continue; } // always leave the first mention as-is
+    next[i] = { ...(next[i] || {}), [word]: synonym };
+    fixedOne = true;
+  }
+  return next;
+}
+
+function applyParagraphOverrides(text, paragraphOverride) {
+  if (!paragraphOverride) return text;
+  let out = text;
+  Object.entries(paragraphOverride).forEach(([word, synonym]) => {
+    out = replaceAllWholeWord(out, word, synonym);
+  });
+  return out;
+}
+
+// Used only in manual-edit mode, where there's just one free-text blob instead
+// of separate paragraphs — keeps the first occurrence, fixes exactly the next one.
+function applySingleOccurrenceReplaceInText(text, word, synonym) {
+  const re = new RegExp(`\\b${word}\\b`, "gi");
+  let seenFirst = false;
+  let done = false;
+  return text.replace(re, (match) => {
+    if (done) return match;
+    if (!seenFirst) { seenFirst = true; return match; }
+    done = true;
+    return match[0] === match[0].toUpperCase() ? cap(synonym) : synonym;
+  });
+}
+
 // ---- persistence ----
 const LS_KEY = "reportCommentBuilder_v1";
 
@@ -228,10 +333,18 @@ function MiniCard({ tag, typeLabel, preview, accent, selected, used, onSelect, o
 // No expansion happens inline — clicking "Change" opens the modal instead.
 function CommentRow({ index, icon: Icon, label, accent, tag, typeLabel, preview, onChangeClick, onRemove }) {
   return (
-    <div style={{
-      display: "flex", alignItems: "flex-start", gap: "10px",
-      padding: "10px 4px", borderBottom: `1px solid ${THEME.border}`,
-    }}>
+    <div
+      onClick={onChangeClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onChangeClick(); }}
+      style={{
+        display: "flex", alignItems: "flex-start", gap: "10px",
+        padding: "10px 8px", margin: "0 -8px", borderRadius: "8px",
+        borderBottom: `1px solid ${THEME.border}`,
+        cursor: "pointer",
+      }}
+    >
       {index && (
         <span style={{ fontSize: "11px", color: THEME.textMuted, fontWeight: 600, paddingTop: "2px", flexShrink: 0, width: "16px" }}>
           {index}
@@ -264,18 +377,16 @@ function CommentRow({ index, icon: Icon, label, accent, tag, typeLabel, preview,
         </div>
       </div>
       <div style={{ display: "flex", gap: "10px", flexShrink: 0, alignItems: "center", paddingTop: "1px" }}>
-        <button
-          onClick={onChangeClick}
+        <span
           style={{
-            fontSize: "12.5px", fontWeight: 600, color: THEME.accent,
-            background: "none", border: "none", cursor: "pointer", padding: 0, whiteSpace: "nowrap",
+            fontSize: "12.5px", fontWeight: 600, color: THEME.accent, whiteSpace: "nowrap",
           }}
         >
           Change
-        </button>
+        </span>
         {onRemove && (
           <button
-            onClick={onRemove}
+            onClick={(e) => { e.stopPropagation(); onRemove(); }}
             aria-label="Remove this paragraph"
             title="Remove this paragraph"
             style={{
@@ -344,7 +455,7 @@ function CategoryDropdown({ value, onChange }) {
 
 // Full-text single-column row, used for the Middle-comment modal since there
 // are only ever 5 options per category — no need to truncate.
-function FullOptionRow({ typeLabel, text, accent, selected, used, onSelect, onToggleUsed }) {
+function FullOptionRow({ tag, typeLabel, text, accent, selected, used, onSelect, onToggleUsed }) {
   return (
     <div
       onClick={onSelect}
@@ -361,6 +472,9 @@ function FullOptionRow({ typeLabel, text, accent, selected, used, onSelect, onTo
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }}>
+        {tag && (
+          <span style={{ fontSize: "12.5px", fontWeight: 700, color: accent }}>{tag}</span>
+        )}
         {typeLabel && (
           <span style={{
             fontSize: "9.5px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em",
@@ -410,7 +524,7 @@ function ChangeModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: THEME.cardBg, borderRadius: "16px", width: "100%", maxWidth: "560px",
+          background: THEME.cardBg, borderRadius: "16px", width: "100%", maxWidth: "660px",
           maxHeight: "80vh", display: "flex", flexDirection: "column",
           boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
         }}
@@ -476,6 +590,7 @@ function ChangeModal({
               {options.map((opt) => (
                 <FullOptionRow
                   key={opt.key}
+                  tag={opt.tag}
                   typeLabel={opt.typeLabel}
                   text={opt.preview}
                   accent={opt.accent}
@@ -503,6 +618,85 @@ function ChangeModal({
               ))}
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DuplicateWordsModal({ duplicates, onApplySynonym, onContinue, onGoBack, continueLabel }) {
+  const clear = duplicates.length === 0;
+  return (
+    <div
+      onClick={onGoBack}
+      style={{
+        position: "fixed", inset: 0, background: THEME.overlay, zIndex: 60,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: "20px",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: THEME.cardBg, borderRadius: "16px", width: "100%", maxWidth: "480px",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+        }}
+      >
+        <div style={{ padding: "18px 20px", borderBottom: `1px solid ${THEME.border}` }}>
+          <span style={{ fontSize: "15px", fontWeight: 700, color: THEME.textPrimary }}>
+            {clear ? "Looks good" : "A few words repeat"}
+          </span>
+          <p style={{ margin: "4px 0 0", fontSize: "12.5px", color: THEME.textSecondary }}>
+            {clear
+              ? "No repeated descriptive words left in this report."
+              : "These words show up more than once. Pick a synonym to vary the wording, or continue as-is."}
+          </p>
+        </div>
+
+        <div style={{ padding: "14px 20px", maxHeight: "50vh", overflowY: "auto" }}>
+          {duplicates.map(({ word, count }) => (
+            <div key={word} style={{ marginBottom: "14px" }}>
+              <div style={{ fontSize: "13px", fontWeight: 700, color: THEME.textPrimary, marginBottom: "6px" }}>
+                "{word}" <span style={{ fontWeight: 500, color: THEME.textMuted }}>appears {count} times</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                {RISK_WORDS[word].map((syn) => (
+                  <button
+                    key={syn}
+                    onClick={() => onApplySynonym(word, syn)}
+                    style={{
+                      fontSize: "12px", fontWeight: 600, color: THEME.accent,
+                      background: THEME.accentSoft, border: `1px solid ${THEME.accent}55`,
+                      borderRadius: "16px", padding: "5px 11px", cursor: "pointer",
+                    }}
+                  >
+                    → {syn}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: "8px", padding: "14px 20px", borderTop: `1px solid ${THEME.border}` }}>
+          <button
+            onClick={onGoBack}
+            style={{
+              flex: 1, padding: "10px", borderRadius: "9px", fontSize: "13px", fontWeight: 600,
+              color: THEME.textSecondary, background: THEME.cardBgSubtle, border: `1px solid ${THEME.border}`,
+              cursor: "pointer",
+            }}
+          >
+            Go Back
+          </button>
+          <button
+            onClick={onContinue}
+            style={{
+              flex: 1, padding: "10px", borderRadius: "9px", fontSize: "13px", fontWeight: 700,
+              color: THEME.accentText, background: THEME.accent, border: "none", cursor: "pointer",
+            }}
+          >
+            {continueLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -540,6 +734,10 @@ export default function ReportGenerator() {
   const [middleCount, setMiddleCount] = useState(initial.middleCount || 3);
   const [copied, setCopied] = useState(false);
   const [activeModal, setActiveModal] = useState(null); // null | {kind:'opening'|'closing'} | {kind:'middle', slotIndex}
+  const [overrides, setOverrides] = useState(initial.overrides || {}); // { paragraphIndex: { word: synonym } }
+  const [manualEditText, setManualEditText] = useState(initial.manualEditText ?? null); // persisted content once hand-edited
+  const [manualEditMode, setManualEditMode] = useState(false); // whether the textarea UI is currently open
+  const [pendingAction, setPendingAction] = useState(null); // null | 'save' | 'copy'
 
   const [usedOpenings, setUsedOpenings] = useState(initial.usedOpenings);
   const [usedClosings, setUsedClosings] = useState(initial.usedClosings);
@@ -562,14 +760,26 @@ export default function ReportGenerator() {
     return [opening, ...middles, closing];
   }, [name, pronounKey, openingIdx, closingIdx, selectedMiddles]);
 
-  const fullText = paragraphs.join("\n\n");
+  const finalParagraphs = useMemo(
+    () => paragraphs.map((text, i) => applyParagraphOverrides(text, overrides[i])),
+    [paragraphs, overrides]
+  );
+  const finalFullText = finalParagraphs.join("\n\n");
+  const hasManualText = manualEditText !== null;
+  const displayText = hasManualText ? manualEditText : finalFullText;
+  const previewParagraphs = hasManualText
+    ? manualEditText.split(/\n\s*\n/).filter(Boolean)
+    : finalParagraphs;
+  const fullText = displayText; // preview, word count, save & copy all use this
+
+  const closingParagraphIdx = selectedMiddles.length + 1;
 
   useEffect(() => {
     saveState({
-      name, pronounKey, openingIdx, closingIdx, selectedMiddles, middleCount,
+      name, pronounKey, openingIdx, closingIdx, selectedMiddles, middleCount, overrides, manualEditText,
       usedOpenings, usedClosings, usedMiddles, saved, editingSavedId,
     });
-  }, [name, pronounKey, openingIdx, closingIdx, selectedMiddles, middleCount, usedOpenings, usedClosings, usedMiddles, saved, editingSavedId]);
+  }, [name, pronounKey, openingIdx, closingIdx, selectedMiddles, middleCount, overrides, manualEditText, usedOpenings, usedClosings, usedMiddles, saved, editingSavedId]);
 
   useEffect(() => {
     if (!activeModal) return;
@@ -621,15 +831,18 @@ export default function ReportGenerator() {
   }
 
   function buildFullTextFor(entry) {
+    if (entry.manualEditText != null) return entry.manualEditText;
     const ep = PRONOUNS[entry.pronounKey];
     const opening = fill(BANK.openings[entry.openingIdx].text, entry.name, ep);
     const middles = entry.selectedMiddles.map((m) => fill(BANK.middles[m.category][m.idx].text, entry.name, ep));
     const closing = fill(BANK.closings[entry.closingIdx].text, entry.name, ep);
-    return [opening, ...middles, closing].join("\n\n");
+    const base = [opening, ...middles, closing];
+    const ov = entry.overrides || {};
+    return base.map((text, i) => applyParagraphOverrides(text, ov[i])).join("\n\n");
   }
 
-  function saveAndNext() {
-    if (!hasName) return;
+  function performSave() {
+    const wasUpdatingExisting = !!editingSavedId;
     const entry = {
       id: editingSavedId || generateId(),
       name: name.trim(),
@@ -637,6 +850,8 @@ export default function ReportGenerator() {
       openingIdx,
       closingIdx,
       selectedMiddles: selectedMiddles.map((m) => ({ ...m })),
+      overrides: JSON.parse(JSON.stringify(overrides)),
+      manualEditText,
       copied: false,
       savedAt: Date.now(),
     };
@@ -646,9 +861,60 @@ export default function ReportGenerator() {
     });
     markCurrentSelectionUsed();
     setEditingSavedId(null);
+    if (wasUpdatingExisting) {
+      // Just finished editing an existing student — close the textarea (if
+      // open) but keep whatever text was saved, and show the full view of it.
+      setManualEditMode(false);
+      return;
+    }
+    // A brand-new save — clear the slate and move on to the next student.
     setName("");
     generateWholeReport();
     setTimeout(() => nameInputRef.current && nameInputRef.current.focus(), 50);
+  }
+
+  function performCopy() {
+    markCurrentSelectionUsed();
+    navigator.clipboard.writeText(displayText).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  function saveAndNext() {
+    if (!hasName) return;
+    const dupes = detectDuplicateRiskWords(displayText);
+    if (dupes.length > 0) { setPendingAction("save"); return; }
+    performSave();
+  }
+
+  function copyText() {
+    if (!hasName) return;
+    const dupes = detectDuplicateRiskWords(displayText);
+    if (dupes.length > 0) { setPendingAction("copy"); return; }
+    performCopy();
+  }
+
+  function applySynonymFix(word, synonym) {
+    if (hasManualText) {
+      setManualEditText((prev) => applySingleOccurrenceReplaceInText(prev, word, synonym));
+    } else {
+      setOverrides((prev) => computeSynonymOverride(paragraphs, prev, word, synonym));
+    }
+  }
+
+  function startManualEdit() {
+    if (manualEditText === null) setManualEditText(finalFullText);
+    setManualEditMode(true);
+  }
+
+  function finishManualEdit() {
+    setManualEditMode(false);
+  }
+
+  function revertManualEdit() {
+    setManualEditText(null);
+    setManualEditMode(false);
   }
 
   function openSaved(id) {
@@ -663,6 +929,9 @@ export default function ReportGenerator() {
     setOpeningIdx(entry.openingIdx);
     setClosingIdx(entry.closingIdx);
     setSelectedMiddles(entry.selectedMiddles.map((m) => ({ ...m })));
+    setOverrides(entry.overrides ? JSON.parse(JSON.stringify(entry.overrides)) : {});
+    setManualEditText(entry.manualEditText ?? null);
+    setManualEditMode(false);
     setEditingSavedId(id);
     setSaved((prev) => prev.map((s) => (s.id === id ? { ...s, copied: true } : s)));
   }
@@ -684,9 +953,13 @@ export default function ReportGenerator() {
       setOpeningIdx(entry.openingIdx);
       setClosingIdx(entry.closingIdx);
       setSelectedMiddles(entry.selectedMiddles.map((m) => ({ ...m })));
+      setOverrides(entry.overrides ? JSON.parse(JSON.stringify(entry.overrides)) : {});
+      setManualEditText(entry.manualEditText ?? null);
+      setManualEditMode(false);
     }
     setEditingSavedId(null);
   }
+
 
   function eraseAllSaved() {
     const ok = window.confirm("Are you sure you want to erase all saved reports? This cannot be undone.");
@@ -698,9 +971,15 @@ export default function ReportGenerator() {
 
   function regenerateOpening() {
     setOpeningIdx(pickUnusedIdx(BANK.openings.length, usedOpenings));
+    setOverrides((prev) => { const n = { ...prev }; delete n[0]; return n; });
+    setManualEditText(null);
+    setManualEditMode(false);
   }
   function regenerateClosing() {
     setClosingIdx(pickUnusedIdx(BANK.closings.length, usedClosings));
+    setOverrides((prev) => { const n = { ...prev }; delete n[closingParagraphIdx]; return n; });
+    setManualEditText(null);
+    setManualEditMode(false);
   }
   function regenerateMiddle(i) {
     const cat = selectedMiddles[i].category;
@@ -719,6 +998,9 @@ export default function ReportGenerator() {
         filter: "all",
       }))
     );
+    setOverrides({});
+    setManualEditText(null);
+    setManualEditMode(false);
   }
 
   function updateMiddleCategory(i, value) {
@@ -727,6 +1009,9 @@ export default function ReportGenerator() {
       next[i] = { category: value, idx: 0, filter: "all" };
       return next;
     });
+    setOverrides((prev) => { const n = { ...prev }; delete n[i + 1]; return n; });
+    setManualEditText(null);
+    setManualEditMode(false);
   }
 
   function updateMiddleIdx(i, idx) {
@@ -735,6 +1020,9 @@ export default function ReportGenerator() {
       next[i] = { ...next[i], idx };
       return next;
     });
+    setOverrides((prev) => { const n = { ...prev }; delete n[i + 1]; return n; });
+    setManualEditText(null);
+    setManualEditMode(false);
   }
 
   function updateMiddleFilter(i, filter) {
@@ -750,19 +1038,16 @@ export default function ReportGenerator() {
     const usedCats = new Set(selectedMiddles.map((m) => m.category));
     const nextCat = CATEGORY_LIST.find((c) => !usedCats.has(c)) || CATEGORY_LIST[0];
     setSelectedMiddles((prev) => [...prev, { category: nextCat, idx: 0, filter: "all" }]);
+    setOverrides({}); // paragraph indices shift once a slot is added; simplest to reset
+    setManualEditText(null);
+    setManualEditMode(false);
   }
 
   function removeMiddle(i) {
     setSelectedMiddles((prev) => prev.filter((_, idx) => idx !== i));
-  }
-
-  function copyText() {
-    if (!hasName) return;
-    markCurrentSelectionUsed();
-    navigator.clipboard.writeText(fullText).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
+    setOverrides({}); // paragraph indices shift once a slot is removed; simplest to reset
+    setManualEditText(null);
+    setManualEditMode(false);
   }
 
   const labelStyle = { fontSize: "12px", fontWeight: 700, color: THEME.textSecondary, letterSpacing: "0.01em", textTransform: "uppercase" };
@@ -786,14 +1071,15 @@ export default function ReportGenerator() {
       onSurprise: regenerateOpening,
       usedCount: usedOpenings.size,
       totalCount: BANK.openings.length,
+      fullText: true,
       options: BANK.openings.map((o, i) => ({
         key: i,
         tag: o.tag,
-        preview: previewText(fill(o.text, name, p), 70),
+        preview: fill(o.text, name, p),
         accent: NEUTRAL_ACCENT,
         selected: openingIdx === i,
         used: usedOpenings.has(i),
-        onSelect: () => { setOpeningIdx(i); setActiveModal(null); },
+        onSelect: () => { setOpeningIdx(i); setOverrides((prev) => { const n = { ...prev }; delete n[0]; return n; }); setActiveModal(null); },
         onToggleUsed: () => toggleSet(setUsedOpenings, i),
       })),
     };
@@ -805,14 +1091,15 @@ export default function ReportGenerator() {
       onSurprise: regenerateClosing,
       usedCount: usedClosings.size,
       totalCount: BANK.closings.length,
+      fullText: true,
       options: BANK.closings.map((c, i) => ({
         key: i,
         tag: c.tag,
-        preview: previewText(fill(c.text, name, p), 70),
+        preview: fill(c.text, name, p),
         accent: NEUTRAL_ACCENT,
         selected: closingIdx === i,
         used: usedClosings.has(i),
-        onSelect: () => { setClosingIdx(i); setActiveModal(null); },
+        onSelect: () => { setClosingIdx(i); setOverrides((prev) => { const n = { ...prev }; delete n[closingParagraphIdx]; return n; }); setActiveModal(null); },
         onToggleUsed: () => toggleSet(setUsedClosings, i),
       })),
     };
@@ -1096,16 +1383,19 @@ export default function ReportGenerator() {
             }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "6px" }}>
                 <span style={{ fontSize: "12px", color: THEME.textMuted, fontWeight: 600 }}>
-                  {wordCount(fullText)} words · {paragraphs.length} paragraphs
+                  {wordCount(displayText)} words
+                  {!hasManualText && ` · ${paragraphs.length} paragraphs`}
                 </span>
-                <span style={{ fontSize: "11px", fontWeight: 700, display: "flex", gap: "8px" }}>
-                  <span style={{ color: TYPE_COLORS.strength.text }}>
-                    {pluralize(selectedMiddles.filter((m) => BANK.middles[m.category][m.idx].type === "strength").length, "strength", "strengths")}
+                {!hasManualText && (
+                  <span style={{ fontSize: "11px", fontWeight: 700, display: "flex", gap: "8px" }}>
+                    <span style={{ color: TYPE_COLORS.strength.text }}>
+                      {pluralize(selectedMiddles.filter((m) => BANK.middles[m.category][m.idx].type === "strength").length, "strength", "strengths")}
+                    </span>
+                    <span style={{ color: TYPE_COLORS.developing.text }}>
+                      {pluralize(selectedMiddles.filter((m) => BANK.middles[m.category][m.idx].type === "developing").length, "growth area", "growth areas")}
+                    </span>
                   </span>
-                  <span style={{ color: TYPE_COLORS.developing.text }}>
-                    {pluralize(selectedMiddles.filter((m) => BANK.middles[m.category][m.idx].type === "developing").length, "growth area", "growth areas")}
-                  </span>
-                </span>
+                )}
               </div>
 
               {editingSavedId && (
@@ -1133,15 +1423,71 @@ export default function ReportGenerator() {
                 </div>
               )}
 
-              <div style={{
-                fontFamily: "'Source Serif 4', Georgia, serif",
-                fontSize: "15.5px", lineHeight: 1.7, color: THEME.textPrimary,
-                marginBottom: "18px",
-              }}>
-                {paragraphs.map((para, i) => (
-                  <p key={i} style={{ margin: "0 0 13px" }}>{para}</p>
-                ))}
-              </div>
+              {manualEditMode ? (
+                <div style={{ marginBottom: "10px" }}>
+                  <div style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px", gap: "8px",
+                  }}>
+                    <span style={{ fontSize: "11.5px", color: THEME.textMuted }}>
+                      Editing by hand — changing any comment below will discard this and return to the generated text.
+                    </span>
+                    <div style={{ display: "flex", gap: "10px", flexShrink: 0 }}>
+                      <button
+                        onClick={revertManualEdit}
+                        style={{
+                          fontSize: "12px", fontWeight: 700, color: THEME.danger,
+                          background: "none", border: "none", cursor: "pointer", padding: 0, whiteSpace: "nowrap",
+                        }}
+                      >
+                        Revert to generated
+                      </button>
+                      <button
+                        onClick={finishManualEdit}
+                        style={{
+                          fontSize: "12px", fontWeight: 700, color: THEME.accent,
+                          background: "none", border: "none", cursor: "pointer", padding: 0, whiteSpace: "nowrap",
+                        }}
+                      >
+                        Done editing
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    value={manualEditText}
+                    onChange={(e) => setManualEditText(e.target.value)}
+                    style={{
+                      width: "100%", minHeight: "220px", resize: "vertical",
+                      fontFamily: "'Source Serif 4', Georgia, serif", fontSize: "15.5px", lineHeight: 1.7,
+                      color: THEME.textPrimary, background: THEME.inputBg,
+                      border: `1.5px solid ${THEME.accent}`, borderRadius: "9px", padding: "12px",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+              ) : (
+                <div style={{
+                  fontFamily: "'Source Serif 4', Georgia, serif",
+                  fontSize: "15.5px", lineHeight: 1.7, color: THEME.textPrimary,
+                  marginBottom: "10px",
+                }}>
+                  {previewParagraphs.map((para, i) => (
+                    <p key={i} style={{ margin: "0 0 13px" }}>{para}</p>
+                  ))}
+                </div>
+              )}
+
+              {!manualEditMode && (
+                <button
+                  onClick={startManualEdit}
+                  style={{
+                    fontSize: "12px", fontWeight: 600, color: THEME.textSecondary,
+                    background: "none", border: "none", cursor: "pointer", padding: 0,
+                    marginBottom: "14px", textDecoration: "underline",
+                  }}
+                >
+                  {hasManualText ? "Continue editing by hand" : "Edit this text by hand"}
+                </button>
+              )}
 
               <button
                 onClick={saveAndNext}
@@ -1181,6 +1527,20 @@ export default function ReportGenerator() {
 
       {activeModal && modalProps && (
         <ChangeModal {...modalProps} onClose={() => setActiveModal(null)} />
+      )}
+
+      {pendingAction && (
+        <DuplicateWordsModal
+          duplicates={detectDuplicateRiskWords(displayText)}
+          onApplySynonym={applySynonymFix}
+          onGoBack={() => setPendingAction(null)}
+          continueLabel={pendingAction === "save" ? "Save & Next Student →" : "Copy Report"}
+          onContinue={() => {
+            if (pendingAction === "save") performSave();
+            else performCopy();
+            setPendingAction(null);
+          }}
+        />
       )}
     </div>
   );
